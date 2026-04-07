@@ -1,164 +1,191 @@
 <!DOCTYPE html>
-<html lang="pt">
+<html>
 <head>
-    <meta charset="UTF-8">
+    <title>Mini HaxBall P2P</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Coto-Craft: Servidor Ativo</title>
-    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
-        body { margin: 0; overflow: hidden; background: #7fb3d5; font-family: 'Courier New', monospace; user-select: none; touch-action: none; }
-        canvas { display: block; }
-        
-        /* INTERFACE INICIAL */
-        #menu { position: fixed; inset: 0; background: rgba(0,0,0,0.9); color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 1000; }
-        .btn { padding: 15px 40px; background: #5a8e44; border: 4px solid #fff; color: white; font-size: 22px; cursor: pointer; font-weight: bold; margin: 10px; }
-        #status { font-size: 14px; color: #0f0; margin-top: 10px; }
-
-        /* HUD */
-        #crosshair { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 20px; height: 20px; z-index: 100; border: 2px solid #fff; border-radius: 50%; mix-blend-mode: difference; }
-        #arm { position: fixed; bottom: -60px; right: 10%; width: 150px; height: 250px; background: #c68642; border: 5px solid #91602d; transform: rotate(-10deg); z-index: 90; pointer-events: none; transition: 0.1s; }
-
-        /* CONTROLO MÓVEL */
-        #m-hud { position: fixed; bottom: 20px; left: 20px; display: none; gap: 10px; z-index: 110; pointer-events: none; }
-        .m-btn { width: 65px; height: 65px; background: rgba(255,255,255,0.2); border: 2px solid #fff; color: white; display: flex; align-items: center; justify-content: center; border-radius: 10px; pointer-events: auto; }
-        #m-jump { position: fixed; bottom: 40px; right: 40px; width: 80px; height: 80px; }
+        body { background: #222; color: #fff; font-family: sans-serif; text-align: center; margin: 0; overflow: hidden; }
+        canvas { background: #355e3b; border: 5px solid #fff; max-width: 95vw; max-height: 70vh; margin-top: 10px; }
+        .menu { padding: 20px; }
+        input { padding: 8px; border-radius: 4px; border: none; }
+        button { padding: 8px 15px; cursor: pointer; background: #28a745; color: white; border: none; border-radius: 4px; }
+        #joystick-container { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: none; }
+        .touch-btn { width: 60px; height: 60px; background: rgba(255,255,255,0.2); border-radius: 50%; border: 2px solid #fff; }
     </style>
 </head>
 <body>
 
-<div id="menu">
-    <h1 style="font-size: 40px;">COTO-CRAFT ONLINE</h1>
-    <button class="btn" onclick="entrar('creative')">MODO CRIATIVO</button>
-    <button class="btn" onclick="entrar('survival')" style="background:#444">SOBREVIVÊNCIA</button>
-    <div id="status">Servidor configurado! ✅</div>
-</div>
+    <div class="menu" id="setup">
+        <h2>Mini HaxBall</h2>
+        <p>O teu ID: <strong id="my-id">...</strong></p>
+        <input type="text" id="peer-id" placeholder="ID do Amigo">
+        <button onclick="connectToPeer()">Conectar</button>
+    </div>
 
-<div id="crosshair"></div>
-<div id="arm"></div>
+    <div id="game-info" style="display:none;">Conectado!</div>
+    <canvas id="field" width="600" height="400"></canvas>
 
-<div id="m-hud">
-    <div class="m-btn" id="btn-w">W</div>
-    <div class="m-btn" id="btn-s">S</div>
-</div>
-<div class="m-btn" id="m-jump" style="display:none">JUMP</div>
+    <div id="joystick-container">
+        <p>Usa o ecrã para mover (Toque)</p>
+    </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        const canvas = document.getElementById('field');
+        const ctx = canvas.getContext('2d');
+        let peer, conn;
+        
+        // Estado do Jogo
+        const game = {
+            p1: { x: 50, y: 200, r: 15, color: 'red' },
+            p2: { x: 550, y: 200, r: 15, color: 'blue' },
+            ball: { x: 300, y: 200, r: 10, vx: 0, vy: 0 },
+            isHost: false
+        };
 
-<script>
-// --- O TEU SERVIDOR ---
-const SERVER_URL = "https://311e055a-c343-438d-8f11-fe3b923c26b4-00-2qka2jkd4ftgl.kirk.replit.dev";
+        const keys = {};
+        window.onkeydown = e => keys[e.code] = true;
+        window.onkeyup = e => keys[e.code] = false;
 
-let scene, camera, renderer, socket, arm, mode;
-let move = { f: 0, b: 0 }, players = {}, blocks = [];
-let velY = 0, canJump = false;
+        // PeerJS Setup
+        peer = new Peer();
+        peer.on('open', id => document.getElementById('my-id').innerText = id);
 
-function entrar(m) {
-    mode = m;
-    document.getElementById('menu').style.display = 'none';
-    if ("ontouchstart" in window) {
-        document.getElementById('m-hud').style.display = 'flex';
-        document.getElementById('m-jump').style.display = 'flex';
-    }
-    
-    // Inicia Socket
-    try {
-        socket = io(SERVER_URL);
-        socket.on('playerUpdate', (data) => {
-            for (let id in data) {
-                if (id !== socket.id) {
-                    if (!players[id]) {
-                        const g = new THREE.BoxGeometry(0.6, 1.8, 0.6);
-                        const m = new THREE.MeshBasicMaterial({ color: 0x0000ff }); // Amigos são azuis
-                        players[id] = new THREE.Mesh(g, m);
-                        scene.add(players[id]);
-                    }
-                    players[id].position.lerp(new THREE.Vector3(data[id].x, data[id].y, data[id].z), 0.2);
-                }
-            }
+        // Lógica de Conexão
+        function connectToPeer() {
+            const id = document.getElementById('peer-id').value;
+            conn = peer.connect(id);
+            setupConn();
+        }
+
+        peer.on('connection', c => {
+            conn = c;
+            game.isHost = true;
+            setupConn();
         });
-        socket.on('playerLeft', (id) => { if(players[id]) { scene.remove(players[id]); delete players[id]; } });
-    } catch(e) { console.log("Sem servidor."); }
 
-    init3D();
-}
+        function setupConn() {
+            document.getElementById('setup').style.display = 'none';
+            document.getElementById('game-info').style.display = 'block';
+            if (window.innerHeight < window.innerWidth) { // Se for mobile
+                document.getElementById('joystick-container').style.display = 'block';
+            }
 
-function init3D() {
-    arm = document.getElementById('arm');
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x7fb3d5);
-    
-    camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-    camera.position.set(0, 5, 0);
-
-    renderer = new THREE.WebGLRenderer({ antialias: false });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    document.body.appendChild(renderer.domElement);
-
-    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-
-    // Chão Inicial
-    const floor = new THREE.Mesh(new THREE.BoxGeometry(50, 1, 50), new THREE.MeshStandardMaterial({color: 0x3d9e3d}));
-    floor.position.y = -0.5;
-    scene.add(floor);
-
-    setupInputs();
-    animate();
-}
-
-function setupInputs() {
-    window.onkeydown = e => { 
-        if(e.code==='KeyW') move.f=1; 
-        if(e.code==='KeyS') move.b=1; 
-        if(e.code==='Space') {
-            if(mode==='survival' && canJump) velY=0.22;
-            if(mode==='creative') camera.position.y += 0.5;
+            conn.on('data', data => {
+                if (game.isHost) {
+                    // Recebe input do telemóvel
+                    if (data.type === 'input') movePlayer(game.p2, data.keys);
+                } else {
+                    // Recebe estado do jogo do PC
+                    Object.assign(game.p1, data.p1);
+                    Object.assign(game.p2, data.p2);
+                    Object.assign(game.ball, data.ball);
+                }
+            });
         }
-        if(e.code==='ShiftLeft' && mode==='creative') camera.position.y -= 0.5;
-    };
-    window.onkeyup = e => { if(e.code==='KeyW') move.f=0; if(e.code==='KeyS') move.b=0; };
 
-    // Mobile
-    const btnW = document.getElementById('btn-w');
-    btnW.ontouchstart = () => move.f=1; btnW.ontouchend = () => move.f=0;
-    document.getElementById('m-jump').ontouchstart = () => { if(canJump) velY=0.22; if(mode==='creative') camera.position.y+=1; };
-
-    // Mouse
-    document.body.onclick = () => renderer.domElement.requestPointerLock();
-    document.onmousemove = e => {
-        if(document.pointerLockElement) {
-            camera.rotation.y -= e.movementX * 0.003;
-            camera.rotation.x -= e.movementY * 0.003;
-            camera.rotation.order = 'YXZ';
+        function movePlayer(player, input) {
+            const speed = 4;
+            if (input.Up) player.y -= speed;
+            if (input.Down) player.y += speed;
+            if (input.Left) player.x -= speed;
+            if (input.Right) player.x += speed;
         }
-    };
-}
 
-function animate() {
-    requestAnimationFrame(animate);
+        function update() {
+            if (!conn) return;
 
-    // Física
-    if(mode === 'survival') {
-        velY -= 0.01; camera.position.y += velY;
-        if(camera.position.y < 2) { camera.position.y = 2; velY = 0; canJump = true; }
-    }
+            if (game.isHost) {
+                // Lógica de movimento local do PC (P1)
+                const p1Input = { Up: keys.KeyW || keys.ArrowUp, Down: keys.KeyS || keys.ArrowDown, Left: keys.KeyA || keys.ArrowLeft, Right: keys.KeyD || keys.ArrowRight };
+                movePlayer(game.p1, p1Input);
 
-    // Movimento
-    let dir = new THREE.Vector3();
-    camera.getWorldDirection(dir);
-    dir.y = 0; dir.normalize();
-    if(move.f) camera.position.addScaledVector(dir, 0.15);
-    if(move.b) camera.position.addScaledVector(dir, -0.15);
+                // Física básica da bola
+                game.ball.x += game.ball.vx;
+                game.ball.y += game.ball.vy;
+                game.ball.vx *= 0.98; // Atrito
+                game.ball.vy *= 0.98;
 
-    // Balanço do Braço
-    if(move.f) arm.style.bottom = (-60 + Math.sin(Date.now()*0.01)*10)+"px";
+                // Colisão simples Jogador-Bola
+                [game.p1, game.p2].forEach(p => {
+                    let dx = game.ball.x - p.x;
+                    let dy = game.ball.y - p.y;
+                    let dist = Math.sqrt(dx*dx + dy*dy);
+                    if (dist < p.r + game.ball.r) {
+                        game.ball.vx = dx * 0.2;
+                        game.ball.vy = dy * 0.2;
+                    }
+                });
 
-    // Enviar Posição ao Replit
-    if(socket && socket.connected) {
-        socket.emit('move', { x: camera.position.x, y: camera.position.y, z: camera.position.z });
-    }
+                // Bordas
+                if (game.ball.y < 0 || game.ball.y > canvas.height) game.ball.vy *= -1;
+                if (game.ball.x < 0 || game.ball.x > canvas.width) {
+                    game.ball.x = 300; game.ball.y = 200; // Golo / Reset
+                    game.ball.vx = 0; game.ball.vy = 0;
+                }
 
-    renderer.render(scene, camera);
-}
-</script>
+                // Envia estado para o telemóvel
+                conn.send({ p1: game.p1, p2: game.p2, ball: game.ball });
+            } else {
+                // Se for o cliente (telemóvel), envia os inputs
+                const myInput = { 
+                    Up: keys.ArrowUp || keys.KeyW, 
+                    Down: keys.ArrowDown || keys.KeyS, 
+                    Left: keys.ArrowLeft || keys.KeyA, 
+                    Right: keys.ArrowRight || keys.KeyD 
+                };
+                conn.send({ type: 'input', keys: myInput });
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Balizas
+            ctx.strokeStyle = "white";
+            ctx.strokeRect(0, 150, 20, 100);
+            ctx.strokeRect(580, 150, 20, 100);
+
+            // Jogadores
+            [game.p1, game.p2].forEach(p => {
+                ctx.fillStyle = p.color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+                ctx.fill();
+                ctx.stroke();
+            });
+
+            // Bola
+            ctx.fillStyle = "white";
+            ctx.beginPath();
+            ctx.arc(game.ball.x, game.ball.y, game.ball.r, 0, Math.PI*2);
+            ctx.fill();
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+        loop();
+
+        // Suporte para Touch (Mobile)
+        canvas.addEventListener('touchstart', e => {
+            const touch = e.touches[0];
+            const rect = canvas.getBoundingClientRect();
+            const tx = (touch.clientX - rect.left) * (canvas.width / rect.width);
+            const ty = (touch.clientY - rect.top) * (canvas.height / rect.height);
+            
+            // Simular setas baseado na posição do toque relativo ao jogador
+            keys.ArrowUp = ty < game.p2.y;
+            keys.ArrowDown = ty > game.p2.y;
+            keys.ArrowLeft = tx < game.p2.x;
+            keys.ArrowRight = tx > game.p2.x;
+        });
+        canvas.addEventListener('touchend', () => {
+            keys.ArrowUp = keys.ArrowDown = keys.ArrowLeft = keys.ArrowRight = false;
+        });
+
+    </script>
 </body>
 </html>
